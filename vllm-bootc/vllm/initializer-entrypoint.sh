@@ -136,7 +136,7 @@ fi
 # Instead: locate api_server.py on disk under the vllm package paths and run it via runpy.
 
 SITEPKG="/opt/app-root/lib64/python3.12/site-packages"
-export SITEPKG LOCAL_MODEL_DIR HOST PORT DTYPE VLLM_DEVICE_TYPE VLLM_EXTRA_ARGS
+export SITEPKG VLLM_MODEL HOST PORT DTYPE VLLM_EXTRA_ARGS
 
 log "Starting vLLM by locating api_server.py on disk (avoids importing vllm.entrypoints)"
 
@@ -189,11 +189,12 @@ if not api_server:
 print(f"[RHOIM] Using api_server.py at: {api_server}")
 
 # Build argv for api_server.py
-model = os.environ["LOCAL_MODEL_DIR"]
+# Note: vLLM 0.11.2+ auto-detects device, --device is no longer a valid argument
+# Pass HuggingFace repo ID directly; vLLM handles download/caching internally
+model = os.environ["VLLM_MODEL"]
 host  = os.environ["HOST"]
 port  = os.environ["PORT"]
 dtype = os.environ["DTYPE"]
-device = os.environ["VLLM_DEVICE_TYPE"]
 extra = os.environ.get("VLLM_EXTRA_ARGS", "").strip()
 
 sys.argv = [
@@ -202,7 +203,6 @@ sys.argv = [
     "--host", host,
     "--port", port,
     "--dtype", dtype,
-    "--device", device,
 ]
 if extra:
     sys.argv.extend(extra.split())

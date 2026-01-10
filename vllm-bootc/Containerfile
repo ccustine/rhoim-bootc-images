@@ -21,12 +21,14 @@ RUN python3 -m pip install --no-cache-dir --upgrade --force-reinstall \
 
 
 # ---- Runtime environment (keep your safety toggles) ----
+# Override HF_HUB_OFFLINE=1 from base image to allow model downloads
 ENV PYTHONUNBUFFERED=1 \
     TORCHDYNAMO_DISABLE=1 \
     TORCHINDUCTOR_DISABLE=1 \
     VLLM_USE_TORCH_COMPILE=0 \
     VLLM_USE_TRITON=0 \
-    RHOIM_ACCELERATOR_MODE=gpu
+    RHOIM_ACCELERATOR_MODE=gpu \
+    HF_HUB_OFFLINE=0
 
 # ---- RHOIM config + entrypoint ----
 COPY etc/ /etc/
@@ -56,4 +58,6 @@ RUN command -v bootc >/dev/null 2>&1 && bootc container lint || true
 # Restore the base image default user (non-root, root group)
 USER 1001:0
 
+# Clear the base image ENTRYPOINT (which runs vLLM directly) so we can use systemd
+ENTRYPOINT []
 CMD ["/sbin/init"]
