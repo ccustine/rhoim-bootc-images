@@ -6,7 +6,11 @@ RUN dnf -y install \
       podman-plugins \
       jq \
       ca-certificates \
+      cloud-init \
     && dnf clean all
+
+# Enable cloud-init services for EC2
+RUN systemctl enable cloud-init cloud-init-local cloud-config cloud-final
 
 RUN mkdir -p \
       /etc/containers/systemd \
