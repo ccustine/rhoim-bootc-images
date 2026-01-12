@@ -124,3 +124,9 @@ RUN if [ "$(uname -m)" = "x86_64" ]; then \
       echo "Skipping NVIDIA libraries on $(uname -m) (CPU-only mode)"; \
     fi
 
+COPY --from=rhaiis /etc /etc
+COPY --from=rhaiis /opt /opt
+COPY --from=rhaiis /root /root
+COPY --from=rhaiis /run /run
+COPY --from=rhaiis /usr /usr
+COPY --from=rhaiis /var /var
