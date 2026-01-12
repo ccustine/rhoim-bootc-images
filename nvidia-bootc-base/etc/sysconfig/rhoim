@@ -1,0 +1,25 @@
+# RHOIM Environment Variables for bootc Model Serving (GPU-only)
+
+# --- Core Paths and Configuration (Used by initializer) ---
+MODEL_ID="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+MODEL_PATH="/tmp/models"
+VLLM_PORT="8000"
+VLLM_HOST="0.0.0.0"
+
+# --- GPU-only device configuration ---
+# This image is NVIDIA GPU-only. CPU mode / fallback is not supported in this variant.
+# Requirements:
+# - NVIDIA drivers on the host
+# - GPU passthrough enabled (e.g. NVIDIA Container Toolkit / CDI)
+#
+# You may override this value, but the initializer will enforce CUDA for GPU-only images.
+VLLM_DEVICE_TYPE="cuda"
+RHOIM_ACCELERATOR_MODE="gpu"
+
+# Optional: extra args passed directly to vLLM OpenAI API server
+VLLM_EXTRA_ARGS=""
+
+# --- Gateway/API Configuration (Used by rhoim-gateway.service, if applicable) ---
+API_KEYS="devkey1,devkey2"
+# BASE_PATH=/
+# ENABLE_RHOAI_ALIAS=true
