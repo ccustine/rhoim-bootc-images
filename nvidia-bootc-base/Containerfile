@@ -1,0 +1,67 @@
+# =============================================================================
+# RHEL 9 Bootc Base Image with NVIDIA CUDA Userspace Libraries
+# =============================================================================
+# This image provides a GPU-enabled RHEL 9 bootc base for inference workloads.
+#
+# IMPORTANT: This image does NOT include kernel modules. The NVIDIA kernel
+# modules must be loaded on the host system. This image only provides the
+# CUDA userspace libraries needed by applications.
+#
+# Use this as a base layer for vLLM, RHAIIS, or custom inference applications.
+#
+# NOTE: Multi-stage squashing via FROM scratch breaks hardlinks required by
+# ostree/bootc. This single-stage build preserves hardlink integrity.
+# =============================================================================
+
+FROM registry.redhat.io/rhel9/rhel-bootc:latest
+
+# Mark as bootc-compatible - ostree.bootable is required for bootc to recognize the image
+LABEL containers.bootc=1 \
+      ostree.bootable=true \
+      org.osbuild.bootc=true \
+      description="RHEL 9 Bootc base image with NVIDIA CUDA userspace libraries (no kernel modules)"
+
+# Install NVIDIA CUDA userspace libraries (x86_64 only) and container toolkit
+# NOTE: Kernel modules are NOT installed - they must be present on the host
+RUN if [ "$(uname -m)" = "x86_64" ]; then \
+      echo "Installing NVIDIA CUDA userspace libraries for x86_64..." && \
+      # Install required dependencies for NVIDIA libraries (X11, OpenGL, Vulkan, etc.)
+      dnf install -y \
+        libX11 \
+        libXext \
+        libglvnd \
+        libglvnd-egl \
+        libglvnd-gles \
+        libglvnd-glx \
+        libglvnd-opengl \
+        libvdpau \
+        vulkan-loader \
+        ocl-icd \
+        opencl-filesystem && \
+      # Add NVIDIA CUDA repository for RHEL 9
+      dnf config-manager --add-repo \
+        https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo && \
+      # Install CUDA userspace libraries only (no kernel modules)
+      # nvidia-driver-libs: Core userspace libraries (libcuda, libnvidia-ml, etc.)
+      # nvidia-driver-cuda-libs: CUDA runtime libraries
+      # nvidia-driver-NVML: NVIDIA Management Library
+      dnf install -y \
+        nvidia-driver-libs \
+        nvidia-driver-cuda-libs \
+        nvidia-driver-NVML && \
+      # Install NVIDIA Container Toolkit (for nested container GPU access)
+      curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | \
+        tee /etc/yum.repos.d/nvidia-container-toolkit.repo && \
+      dnf install -y nvidia-container-toolkit && \
+      # Verify CUDA libraries are installed
+      echo "Checking NVIDIA CUDA libraries..." && \
+      ldconfig -p | grep -E "(libcuda|libnvidia)" | head -10 && \
+      # Clean up all caches to minimize layer size
+      dnf clean all && \
+      rm -rf /var/cache/dnf /var/cache/yum /var/log/dnf* /var/log/yum*; \
+    else \
+      echo "Skipping NVIDIA libraries on $(uname -m) (CPU-only mode)"; \
+    fi
+
+# Bootc images must run systemd as PID 1
+CMD ["/sbin/init"]
