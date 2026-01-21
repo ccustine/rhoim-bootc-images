@@ -118,6 +118,73 @@ module "network" {
   source = "../modules/aws-network"
 }
 
+# IAM role for builder instance
+resource "aws_iam_role" "builder" {
+  name = "${var.instance_name}-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = {
+    Name = "${var.instance_name}-role"
+  }
+}
+
+# Policy for S3 access and VM Import (for AMI creation)
+resource "aws_iam_role_policy" "builder_s3" {
+  name = "${var.instance_name}-s3-policy"
+  role = aws_iam_role.builder.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          "arn:aws:s3:::ccustine-rhoim-bootc",
+          "arn:aws:s3:::ccustine-rhoim-bootc/*",
+          "arn:aws:s3:::rhoim-images",
+          "arn:aws:s3:::rhoim-images/*"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ec2:ImportSnapshot",
+          "ec2:DescribeImportSnapshotTasks",
+          "ec2:RegisterImage",
+          "ec2:DescribeImages"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# Instance profile to attach role to EC2
+resource "aws_iam_instance_profile" "builder" {
+  name = "${var.instance_name}-profile"
+  role = aws_iam_role.builder.name
+
+  tags = {
+    Name = "${var.instance_name}-profile"
+  }
+}
+
 # Security group for the builder instance
 resource "aws_security_group" "builder" {
   name        = "${local.instance_name}-sg"
@@ -155,7 +222,8 @@ resource "aws_instance" "builder" {
   vpc_security_group_ids      = [aws_security_group.builder.id]
   associate_public_ip_address = true
 
-  key_name = var.key_name
+  key_name             = var.key_name
+  iam_instance_profile = aws_iam_instance_profile.builder.name
 
   root_block_device {
     volume_size           = var.root_volume_size
@@ -200,7 +268,7 @@ locals {
 
     # Step 3: Register with Red Hat subscription manager
     echo "=== Registering with Red Hat subscription manager ==="
-    
+
     # Wait for network and SSL/TLS stack to be fully ready
     echo "Waiting for network stack to be fully initialized..."
     for i in {1..30}; do
@@ -217,11 +285,11 @@ locals {
       fi
       sleep 2
     done
-    
+
     # Additional delay to ensure SSL/TLS libraries are fully loaded
     echo "Waiting for SSL/TLS stack to stabilize..."
     sleep 5
-    
+
     # Attempt registration with retry logic
     RHSM_SUCCESS=false
     for attempt in {1..3}; do
@@ -239,7 +307,7 @@ locals {
         fi
       fi
     done
-    
+
     if [ "$RHSM_SUCCESS" = "false" ]; then
       echo "[WARNING] Red Hat subscription manager registration failed after 3 attempts"
       echo "[WARNING] Continuing setup - you can register manually later with:"

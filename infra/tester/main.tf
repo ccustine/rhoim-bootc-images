@@ -150,7 +150,7 @@ resource "aws_instance" "gpu_host" {
 locals {
   user_data = <<-EOF
     #!/bin/bash
-    set -ex
+    set -e
 
     # Log output to file for debugging
     exec > >(tee /var/log/user-data.log) 2>&1
@@ -231,7 +231,7 @@ locals {
     # Create the post-boot setup script
     cat > /usr/local/bin/nvidia-post-boot-setup.sh <<'SCRIPT_EOF'
     #!/bin/bash
-    set -ex
+    set -e
 
     exec > >(tee -a /var/log/nvidia-post-boot-setup.log) 2>&1
 
