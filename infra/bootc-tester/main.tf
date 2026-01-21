@@ -93,6 +93,50 @@ module "network" {
   source = "../modules/aws-network"
 }
 
+# Hugging Face token secret (shared module)
+# Set create_secret = false to use existing secret, true to create new one
+module "hf_secret" {
+  source        = "../modules/hf-secret"
+  create_secret = false  # Use existing secret
+}
+
+# IAM role for bootc-tester instance
+resource "aws_iam_role" "bootc_tester" {
+  name = "${local.instance_name}-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
+  })
+
+  tags = merge({
+    Name = "${local.instance_name}-role"
+  }, local.common_tags)
+}
+
+# Policy for reading HF token from Secrets Manager
+resource "aws_iam_role_policy" "read_hf_secret" {
+  name   = "${local.instance_name}-hf-secret-policy"
+  role   = aws_iam_role.bootc_tester.id
+  policy = module.hf_secret.read_policy_json
+}
+
+# Instance profile to attach role to EC2
+resource "aws_iam_instance_profile" "bootc_tester" {
+  name = "${local.instance_name}-profile"
+  role = aws_iam_role.bootc_tester.name
+
+  tags = merge({
+    Name = "${local.instance_name}-profile"
+  }, local.common_tags)
+}
+
 # Security group for the bootc-tester instance
 resource "aws_security_group" "bootc_tester" {
   name        = "${local.instance_name}-sg"
@@ -139,7 +183,8 @@ resource "aws_instance" "bootc_tester" {
   vpc_security_group_ids      = [aws_security_group.bootc_tester.id]
   associate_public_ip_address = true
 
-  key_name = var.key_name
+  key_name             = var.key_name
+  iam_instance_profile = aws_iam_instance_profile.bootc_tester.name
 
   root_block_device {
     volume_size           = var.root_volume_size
@@ -184,7 +229,42 @@ locals {
         --org="${var.rhsm_org_id}" || echo "RHSM registration failed - continuing"
     fi
 
-    # Step 2: Wait for NVIDIA driver to be ready
+    # Step 2: Fetch Hugging Face token from Secrets Manager
+    echo "=== Fetching Hugging Face token from Secrets Manager ==="
+    HF_SECRET_NAME="${module.hf_secret.secret_name}"
+
+    # Wait for instance metadata service to be available
+    for i in {1..10}; do
+      if curl -s -m 2 http://169.254.169.254/latest/meta-data/ &>/dev/null; then
+        break
+      fi
+      echo "Waiting for IMDS... ($i/10)"
+      sleep 2
+    done
+
+    # Fetch the token using AWS CLI (uses instance role credentials)
+    if HF_TOKEN=$(aws secretsmanager get-secret-value \
+        --secret-id "$HF_SECRET_NAME" \
+        --query SecretString \
+        --output text \
+        --region ${var.aws_region} 2>/dev/null); then
+
+      # Create environment file for vLLM and other services
+      mkdir -p /etc/vllm
+      echo "HF_TOKEN=$HF_TOKEN" > /etc/vllm/hf-token.env
+      chmod 600 /etc/vllm/hf-token.env
+
+      # Also set in global environment for all users/services
+      echo "HF_TOKEN=$HF_TOKEN" > /etc/profile.d/hf-token.sh
+      chmod 644 /etc/profile.d/hf-token.sh
+
+      echo "[SUCCESS] Hugging Face token retrieved and stored"
+    else
+      echo "[WARNING] Failed to fetch HF token - models requiring auth will not work"
+      echo "[WARNING] Ensure the secret '$HF_SECRET_NAME' exists and has a value"
+    fi
+
+    # Step 3: Wait for NVIDIA driver to be ready
     echo "=== Waiting for NVIDIA driver ==="
     for i in {1..30}; do
       if nvidia-smi &>/dev/null; then
@@ -195,20 +275,20 @@ locals {
       sleep 2
     done
 
-    # Step 2: Verify NVIDIA driver
+    # Step 4: Verify NVIDIA driver
     echo "=== Verifying NVIDIA driver ==="
     nvidia-smi
 
-    # Step 3: Generate CDI configuration (device-specific)
+    # Step 5: Generate CDI configuration (device-specific)
     echo "=== Generating CDI configuration ==="
     mkdir -p /etc/cdi
     nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 
-    # Step 4: Enable podman socket
+    # Step 6: Enable podman socket
     echo "=== Enabling podman socket ==="
     systemctl enable --now podman.socket
 
-    # Step 5: Verify bootc status
+    # Step 7: Verify bootc status
     echo "=== Bootc status ==="
     bootc status
 
@@ -235,4 +315,14 @@ output "ssh_command" {
 
 output "ami_id" {
   value = var.ami_id
+}
+
+output "hf_secret_name" {
+  description = "Name of the Secrets Manager secret for HF token (set value via AWS Console or CLI)"
+  value       = module.hf_secret.secret_name
+}
+
+output "hf_secret_arn" {
+  description = "ARN of the Secrets Manager secret for HF token"
+  value       = module.hf_secret.secret_arn
 }
