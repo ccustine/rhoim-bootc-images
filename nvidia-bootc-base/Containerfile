@@ -1,0 +1,223 @@
+FROM registry.redhat.io/rhel9/rhel-bootc:latest
+
+# Build arguments for registry authentication (pass via --build-arg)
+ARG REDHAT_REGISTRY_USERNAME
+ARG REDHAT_REGISTRY_TOKEN
+
+# NVIDIA driver and kernel version configuration
+# Update these to test upgrades or change driver versions
+ARG NVIDIA_DRIVER_VERSION=570.195.03
+ARG KERNEL_VERSION=5.14.0-611.5.1.el9_7
+
+# Mark as bootc-compatible - ostree.bootable is required for bootc to recognize the image
+LABEL containers.bootc=1 \
+      ostree.bootable=true \
+      org.osbuild.bootc=true \
+      description="RHEL 9 Bootc base image with NVIDIA driver ${NVIDIA_DRIVER_VERSION} and kernel modules"
+
+# Step 1: Install container tools and upgrade OpenSSL for bootc compatibility
+RUN dnf -y install bootc podman skopeo && \
+    dnf -y upgrade openssl openssl-libs && \
+    systemctl enable podman.socket && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+# Step 2: Install specific kernel version and pin it (x86_64 only)
+# This kernel version has precompiled NVIDIA modules available
+RUN if [ "$(uname -m)" = "x86_64" ]; then \
+      echo "Installing and pinning kernel ${KERNEL_VERSION}..." && \
+      dnf -y install \
+        kernel-${KERNEL_VERSION} \
+        kernel-core-${KERNEL_VERSION} \
+        kernel-modules-${KERNEL_VERSION} \
+        kernel-modules-core-${KERNEL_VERSION} && \
+      # Remove all other kernel versions to prevent booting incompatible kernel
+      rpm -qa | grep -E '^kernel(-core|-modules|-modules-core)?-[0-9]' | grep -v "${KERNEL_VERSION}" | xargs -r dnf -y remove || true && \
+      # Set the specific kernel as default
+      grubby --set-default /boot/vmlinuz-${KERNEL_VERSION}.x86_64 || true && \
+      # Pin kernel packages to prevent updates
+      dnf -y install python3-dnf-plugin-versionlock && \
+      dnf versionlock add kernel kernel-core kernel-modules kernel-modules-core && \
+      echo "exclude=kernel*" >> /etc/dnf/dnf.conf && \
+      dnf clean all && \
+      rm -rf /var/cache/dnf; \
+    fi
+
+# Step 3: Install NVIDIA driver with precompiled kernel modules (x86_64 only)
+RUN if [ "$(uname -m)" = "x86_64" ]; then \
+      echo "Installing NVIDIA driver ${NVIDIA_DRIVER_VERSION} with kernel modules..." && \
+      # Install required dependencies for NVIDIA libraries (X11, OpenGL, Vulkan, etc.)
+      dnf install -y \
+        libX11 \
+        libXext \
+        libglvnd \
+        libglvnd-egl \
+        libglvnd-gles \
+        libglvnd-glx \
+        libglvnd-opengl \
+        libvdpau \
+        vulkan-loader \
+        ocl-icd \
+        opencl-filesystem && \
+      # Add NVIDIA CUDA repository for RHEL 9
+      dnf config-manager --add-repo \
+        https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo && \
+      # Disable nvidia-driver module to prevent modular filtering from blocking packages
+      dnf -y module reset nvidia-driver || true && \
+      # Install NVIDIA driver with precompiled kernel modules (specific version matching kernel)
+      # Install all packages directly from URLs to avoid module filtering issues
+      NVIDIA_BASE_URL="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64" && \
+      KERNEL_SHORT=$(echo "${KERNEL_VERSION}" | sed 's/\.el9.*//') && \
+      EL_SUFFIX=$(echo "${KERNEL_VERSION}" | grep -o 'el9[^.]*') && \
+      dnf -y --setopt=module_hotfixes=1 install \
+        ${NVIDIA_BASE_URL}/kmod-nvidia-${NVIDIA_DRIVER_VERSION}-${KERNEL_SHORT}-${NVIDIA_DRIVER_VERSION}-3.${EL_SUFFIX}.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-driver-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-driver-libs-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-driver-cuda-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-driver-cuda-libs-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-kmod-common-${NVIDIA_DRIVER_VERSION}-1.el9.noarch.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-modprobe-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-persistenced-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/libnvidia-ml-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/libnvidia-cfg-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm && \
+      # Install NVIDIA Container Toolkit (for container GPU access)
+      curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | \
+        tee /etc/yum.repos.d/nvidia-container-toolkit.repo && \
+      dnf install -y nvidia-container-toolkit && \
+      # Verify NVIDIA libraries are installed
+      echo "Checking NVIDIA libraries..." && \
+      ldconfig -p | grep -E "(libcuda|libnvidia)" | head -10 && \
+      # Clean up all caches to minimize layer size
+      dnf clean all && \
+      rm -rf /var/cache/dnf /var/cache/yum /var/log/dnf* /var/log/yum*; \
+    else \
+      echo "Skipping NVIDIA driver on $(uname -m) (CPU-only mode)"; \
+    fi
+
+# Step 4: Create post-boot NVIDIA setup service
+# This service runs on first boot to configure CDI and device permissions
+RUN if [ "$(uname -m)" = "x86_64" ]; then \
+      # Create the systemd service using printf to avoid heredoc issues
+      printf '%s\n' \
+        '[Unit]' \
+        'Description=NVIDIA Driver Post-Boot Setup' \
+        'After=network.target' \
+        'ConditionPathExists=!/var/lib/nvidia-setup-complete' \
+        '' \
+        '[Service]' \
+        'Type=oneshot' \
+        'ExecStart=/usr/local/bin/nvidia-post-boot-setup.sh' \
+        'RemainAfterExit=yes' \
+        '' \
+        '[Install]' \
+        'WantedBy=multi-user.target' \
+        > /etc/systemd/system/nvidia-post-boot-setup.service && \
+      # Create the post-boot setup script
+      printf '%s\n' \
+        '#!/bin/bash' \
+        'set -e' \
+        '' \
+        'exec > >(tee -a /var/log/nvidia-post-boot-setup.log) 2>&1' \
+        '' \
+        'echo "Running NVIDIA post-boot setup - $(date)"' \
+        '' \
+        'echo "=== Verifying NVIDIA driver installation ==="' \
+        'if nvidia-smi; then' \
+        '    echo "NVIDIA driver installed successfully"' \
+        'else' \
+        '    echo "WARNING: nvidia-smi failed, driver may need attention"' \
+        '    exit 1' \
+        'fi' \
+        '' \
+        'echo "=== Generating CDI configuration ==="' \
+        'nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml' \
+        '' \
+        'echo "=== Setting GPU device permissions ==="' \
+        'chmod 666 /dev/nvidia* 2>/dev/null || true' \
+        '# Fix nvidia-caps directory permissions for non-root container access' \
+        'if [ -d /dev/nvidia-caps ]; then' \
+        '    chmod 755 /dev/nvidia-caps' \
+        '    chmod 666 /dev/nvidia-caps/* 2>/dev/null || true' \
+        'fi' \
+        '' \
+        '# Create udev rules for persistent permissions' \
+        'echo '\''KERNEL=="nvidia*", MODE="0666"'\'' > /etc/udev/rules.d/70-nvidia.rules' \
+        'echo '\''KERNEL=="nvidia-caps/*", MODE="0666"'\'' >> /etc/udev/rules.d/70-nvidia.rules' \
+        '' \
+        'udevadm control --reload-rules' \
+        '' \
+        'echo "=== Configuring SELinux for container GPU access ==="' \
+        '# Enable SELinux booleans for container device access' \
+        'setsebool -P container_use_devices on 2>/dev/null || true' \
+        'setsebool -P container_use_xserver_devices on 2>/dev/null || true' \
+        '' \
+        'echo "=== NVIDIA setup complete - $(date) ==="' \
+        'touch /var/lib/nvidia-setup-complete' \
+        > /usr/local/bin/nvidia-post-boot-setup.sh && \
+      chmod +x /usr/local/bin/nvidia-post-boot-setup.sh && \
+      systemctl enable nvidia-post-boot-setup.service; \
+    fi
+
+# Step 5: Install cloud-init for AWS EC2 SSH key provisioning and instance configuration
+RUN dnf install -y cloud-init && \
+    systemctl enable cloud-init cloud-init-local cloud-config cloud-final && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+# Step 6: Configure cloud-init default user for EC2 compatibility
+RUN mkdir -p /etc/cloud/cloud.cfg.d && \
+    echo '#cloud-config' > /etc/cloud/cloud.cfg.d/99_ec2_user.cfg && \
+    echo 'system_info:' >> /etc/cloud/cloud.cfg.d/99_ec2_user.cfg && \
+    echo '  default_user:' >> /etc/cloud/cloud.cfg.d/99_ec2_user.cfg && \
+    echo '    name: ec2-user' >> /etc/cloud/cloud.cfg.d/99_ec2_user.cfg && \
+    echo '    lock_passwd: true' >> /etc/cloud/cloud.cfg.d/99_ec2_user.cfg && \
+    echo '    gecos: EC2 Default User' >> /etc/cloud/cloud.cfg.d/99_ec2_user.cfg && \
+    echo '    groups: [wheel, adm, systemd-journal]' >> /etc/cloud/cloud.cfg.d/99_ec2_user.cfg && \
+    echo '    sudo: ["ALL=(ALL) NOPASSWD:ALL"]' >> /etc/cloud/cloud.cfg.d/99_ec2_user.cfg && \
+    echo '    shell: /bin/bash' >> /etc/cloud/cloud.cfg.d/99_ec2_user.cfg
+
+# Step 7: Configure firewall to allow SSH and vLLM API access
+RUN dnf install -y firewalld && \
+    mkdir -p /etc/firewalld/zones && \
+    echo '<?xml version="1.0" encoding="utf-8"?>' > /etc/firewalld/zones/public.xml && \
+    echo '<zone>' >> /etc/firewalld/zones/public.xml && \
+    echo '  <short>Public</short>' >> /etc/firewalld/zones/public.xml && \
+    echo '  <description>For use in public areas. SSH and vLLM API ports are open.</description>' >> /etc/firewalld/zones/public.xml && \
+    echo '  <service name="ssh"/>' >> /etc/firewalld/zones/public.xml && \
+    echo '  <service name="dhcpv6-client"/>' >> /etc/firewalld/zones/public.xml && \
+    echo '  <port protocol="tcp" port="8000"/>' >> /etc/firewalld/zones/public.xml && \
+    echo '</zone>' >> /etc/firewalld/zones/public.xml && \
+    systemctl enable firewalld && \
+    dnf clean all && \
+    rm -rf /var/cache/dnf
+
+# Step 8: Configure container registry authentication and Quadlet vLLM service
+# Registry credentials are passed via --build-arg at build time
+RUN mkdir -p /etc/containers/systemd /var/lib/rhoim/models /var/lib/rhoim/cache && \
+    if [ -n "${REDHAT_REGISTRY_USERNAME}" ] && [ -n "${REDHAT_REGISTRY_TOKEN}" ]; then \
+      AUTH_B64=$(printf '%s:%s' "${REDHAT_REGISTRY_USERNAME}" "${REDHAT_REGISTRY_TOKEN}" | base64 -w0) && \
+      printf '{\n  "auths": {\n    "registry.redhat.io": {\n      "auth": "%s"\n    }\n  }\n}\n' "${AUTH_B64}" \
+        > /etc/containers/auth.json && \
+      chmod 600 /etc/containers/auth.json && \
+      echo "Registry authentication configured for registry.redhat.io"; \
+    else \
+      echo "WARNING: REDHAT_REGISTRY_USERNAME or REDHAT_REGISTRY_TOKEN not provided"; \
+      echo "Container pulls from registry.redhat.io will require manual authentication"; \
+    fi
+
+# Step 9: Copy configuration files and Quadlet container definition
+COPY etc/sysconfig/rhoim /etc/sysconfig/rhoim
+COPY etc/sysusers.d/rhoim.conf /etc/sysusers.d/rhoim.conf
+COPY etc/containers/systemd/rhoim-vllm.container /etc/containers/systemd/rhoim-vllm.container
+COPY etc/systemd/system/fetch-hf-token.service /etc/systemd/system/fetch-hf-token.service
+COPY vllm/fetch-hf-token.sh /usr/local/bin/fetch-hf-token.sh
+
+# Step 10: Create rhoim user and enable services
+RUN systemd-sysusers && \
+    chmod +x /usr/local/bin/fetch-hf-token.sh && \
+    mkdir -p /etc/vllm && \
+    chown -R rhoim:rhoim /var/lib/rhoim && \
+    systemctl enable fetch-hf-token.service
+
+# Bootc CMD - must be /sbin/init for systemd
+CMD ["/sbin/init"]
