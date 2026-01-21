@@ -1,9 +1,0 @@
-aws_region       = "us-east-1"
-resource_prefix  = "your-prefix-rhoim-bootc-tester"
-key_name         = "your-key-name"
-ami_id           = "ami-0c61973841f4985d0"
-instance_type    = "g4dn.xlarge"
-
-# Restrict SSH and API access to your IP for security
-ssh_cidr_blocks  = ["YOUR_IP/32"]
-api_cidr_blocks  = ["YOUR_IP/32"]
