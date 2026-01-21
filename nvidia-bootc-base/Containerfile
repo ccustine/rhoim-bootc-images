@@ -1,10 +1,19 @@
 FROM registry.redhat.io/rhel9/rhel-bootc:latest
 
+# Build arguments for registry authentication (pass via --build-arg)
+ARG REDHAT_REGISTRY_USERNAME
+ARG REDHAT_REGISTRY_TOKEN
+
+# NVIDIA driver and kernel version configuration
+# Update these to test upgrades or change driver versions
+ARG NVIDIA_DRIVER_VERSION=570.195.03
+ARG KERNEL_VERSION=5.14.0-611.5.1.el9_7
+
 # Mark as bootc-compatible - ostree.bootable is required for bootc to recognize the image
 LABEL containers.bootc=1 \
       ostree.bootable=true \
       org.osbuild.bootc=true \
-      description="RHEL 9 Bootc base image with NVIDIA driver 570.195.03 and kernel modules"
+      description="RHEL 9 Bootc base image with NVIDIA driver ${NVIDIA_DRIVER_VERSION} and kernel modules"
 
 # Step 1: Install container tools and upgrade OpenSSL for bootc compatibility
 RUN dnf -y install bootc podman skopeo && \
@@ -16,8 +25,7 @@ RUN dnf -y install bootc podman skopeo && \
 # Step 2: Install specific kernel version and pin it (x86_64 only)
 # This kernel version has precompiled NVIDIA modules available
 RUN if [ "$(uname -m)" = "x86_64" ]; then \
-      echo "Installing and pinning kernel 5.14.0-611.5.1.el9_7..." && \
-      KERNEL_VERSION="5.14.0-611.5.1.el9_7" && \
+      echo "Installing and pinning kernel ${KERNEL_VERSION}..." && \
       dnf -y install \
         kernel-${KERNEL_VERSION} \
         kernel-core-${KERNEL_VERSION} \
@@ -37,7 +45,7 @@ RUN if [ "$(uname -m)" = "x86_64" ]; then \
 
 # Step 3: Install NVIDIA driver with precompiled kernel modules (x86_64 only)
 RUN if [ "$(uname -m)" = "x86_64" ]; then \
-      echo "Installing NVIDIA driver 570.195.03 with kernel modules..." && \
+      echo "Installing NVIDIA driver ${NVIDIA_DRIVER_VERSION} with kernel modules..." && \
       # Install required dependencies for NVIDIA libraries (X11, OpenGL, Vulkan, etc.)
       dnf install -y \
         libX11 \
@@ -57,20 +65,21 @@ RUN if [ "$(uname -m)" = "x86_64" ]; then \
       # Disable nvidia-driver module to prevent modular filtering from blocking packages
       dnf -y module reset nvidia-driver || true && \
       # Install NVIDIA driver with precompiled kernel modules (specific version matching kernel)
-      # Using 570.195.03 which has precompiled modules for kernel 5.14.0-611.5.1
       # Install all packages directly from URLs to avoid module filtering issues
       NVIDIA_BASE_URL="https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64" && \
+      KERNEL_SHORT=$(echo "${KERNEL_VERSION}" | sed 's/\.el9.*//') && \
+      EL_SUFFIX=$(echo "${KERNEL_VERSION}" | grep -o 'el9[^.]*') && \
       dnf -y --setopt=module_hotfixes=1 install \
-        ${NVIDIA_BASE_URL}/kmod-nvidia-570.195.03-5.14.0-611.5.1-570.195.03-3.el9_7.x86_64.rpm \
-        ${NVIDIA_BASE_URL}/nvidia-driver-570.195.03-1.el9.x86_64.rpm \
-        ${NVIDIA_BASE_URL}/nvidia-driver-libs-570.195.03-1.el9.x86_64.rpm \
-        ${NVIDIA_BASE_URL}/nvidia-driver-cuda-570.195.03-1.el9.x86_64.rpm \
-        ${NVIDIA_BASE_URL}/nvidia-driver-cuda-libs-570.195.03-1.el9.x86_64.rpm \
-        ${NVIDIA_BASE_URL}/nvidia-kmod-common-570.195.03-1.el9.noarch.rpm \
-        ${NVIDIA_BASE_URL}/nvidia-modprobe-570.195.03-1.el9.x86_64.rpm \
-        ${NVIDIA_BASE_URL}/nvidia-persistenced-570.195.03-1.el9.x86_64.rpm \
-        ${NVIDIA_BASE_URL}/libnvidia-ml-570.195.03-1.el9.x86_64.rpm \
-        ${NVIDIA_BASE_URL}/libnvidia-cfg-570.195.03-1.el9.x86_64.rpm && \
+        ${NVIDIA_BASE_URL}/kmod-nvidia-${NVIDIA_DRIVER_VERSION}-${KERNEL_SHORT}-${NVIDIA_DRIVER_VERSION}-3.${EL_SUFFIX}.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-driver-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-driver-libs-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-driver-cuda-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-driver-cuda-libs-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-kmod-common-${NVIDIA_DRIVER_VERSION}-1.el9.noarch.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-modprobe-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/nvidia-persistenced-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/libnvidia-ml-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm \
+        ${NVIDIA_BASE_URL}/libnvidia-cfg-${NVIDIA_DRIVER_VERSION}-1.el9.x86_64.rpm && \
       # Install NVIDIA Container Toolkit (for container GPU access)
       curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | \
         tee /etc/yum.repos.d/nvidia-container-toolkit.repo && \
@@ -181,3 +190,34 @@ RUN dnf install -y firewalld && \
     systemctl enable firewalld && \
     dnf clean all && \
     rm -rf /var/cache/dnf
+
+# Step 8: Configure container registry authentication and Quadlet vLLM service
+# Registry credentials are passed via --build-arg at build time
+RUN mkdir -p /etc/containers/systemd /var/lib/rhoim/models /var/lib/rhoim/cache && \
+    if [ -n "${REDHAT_REGISTRY_USERNAME}" ] && [ -n "${REDHAT_REGISTRY_TOKEN}" ]; then \
+      AUTH_B64=$(printf '%s:%s' "${REDHAT_REGISTRY_USERNAME}" "${REDHAT_REGISTRY_TOKEN}" | base64 -w0) && \
+      printf '{\n  "auths": {\n    "registry.redhat.io": {\n      "auth": "%s"\n    }\n  }\n}\n' "${AUTH_B64}" \
+        > /etc/containers/auth.json && \
+      chmod 600 /etc/containers/auth.json && \
+      echo "Registry authentication configured for registry.redhat.io"; \
+    else \
+      echo "WARNING: REDHAT_REGISTRY_USERNAME or REDHAT_REGISTRY_TOKEN not provided"; \
+      echo "Container pulls from registry.redhat.io will require manual authentication"; \
+    fi
+
+# Step 9: Copy configuration files and Quadlet container definition
+COPY etc/sysconfig/rhoim /etc/sysconfig/rhoim
+COPY etc/sysusers.d/rhoim.conf /etc/sysusers.d/rhoim.conf
+COPY etc/containers/systemd/rhoim-vllm.container /etc/containers/systemd/rhoim-vllm.container
+COPY etc/systemd/system/fetch-hf-token.service /etc/systemd/system/fetch-hf-token.service
+COPY vllm/fetch-hf-token.sh /usr/local/bin/fetch-hf-token.sh
+
+# Step 10: Create rhoim user and enable services
+RUN systemd-sysusers && \
+    chmod +x /usr/local/bin/fetch-hf-token.sh && \
+    mkdir -p /etc/vllm && \
+    chown -R rhoim:rhoim /var/lib/rhoim && \
+    systemctl enable fetch-hf-token.service
+
+# Bootc CMD - must be /sbin/init for systemd
+CMD ["/sbin/init"]
