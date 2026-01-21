@@ -19,12 +19,22 @@ USER 0
 
 # ---- Install what bootc+systemd appliance needs (keep minimal) ----
 # NOTE: Depending on the RHAIIS image contents, some of these may already exist.
-RUN dnf -y install \
+# Use --allowerasing to replace curl-minimal with full curl (needed for AWS CLI)
+RUN dnf -y install --allowerasing \
       systemd \
       jq \
       procps-ng \
       which \
+      unzip \
+      curl \
+      bootc \
     && dnf clean all
+
+# ---- Install AWS CLI for Secrets Manager access ----
+RUN curl -sL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "/tmp/awscliv2.zip" && \
+    unzip -q /tmp/awscliv2.zip -d /tmp && \
+    /tmp/aws/install && \
+    rm -rf /tmp/aws /tmp/awscliv2.zip
 
 # Install huggingface-cli, but keep huggingface_hub compatible with transformers in this stack
 RUN python3 -m pip install --no-cache-dir --upgrade --force-reinstall \
@@ -44,16 +54,18 @@ ENV PYTHONUNBUFFERED=1 \
 # ---- RHOIM config + entrypoint ----
 COPY etc/ /etc/
 COPY vllm/initializer-entrypoint.sh /usr/local/bin/initializer-entrypoint.sh
-RUN chmod +x /usr/local/bin/initializer-entrypoint.sh
+COPY vllm/fetch-hf-token.sh /usr/local/bin/fetch-hf-token.sh
+RUN chmod +x /usr/local/bin/initializer-entrypoint.sh /usr/local/bin/fetch-hf-token.sh
 
 # ---- Users + layout ----
 # NOTE: `systemctl enable` can fail during container build (no running systemd).
 # For bootc/systemd images, enabling via symlink is equivalent.
 RUN systemd-sysusers && \
-    mkdir -p /opt/rhoim/{bin,models,gateway} /tmp/models /sysroot && \
+    mkdir -p /opt/rhoim/{bin,models,gateway} /tmp/models /sysroot /etc/vllm && \
     chown -R rhoim:rhoim /opt/rhoim /tmp/models && \
     mkdir -p /etc/systemd/system/multi-user.target.wants && \
-    ln -sf /usr/lib/systemd/system/rhoim-vllm.service /etc/systemd/system/multi-user.target.wants/rhoim-vllm.service
+    ln -sf /etc/systemd/system/fetch-hf-token.service /etc/systemd/system/multi-user.target.wants/fetch-hf-token.service && \
+    ln -sf /etc/systemd/system/rhoim-vllm.service /etc/systemd/system/multi-user.target.wants/rhoim-vllm.service
 
 # ---- Verify vLLM exists in the base image (fail at build time if not) ----
 RUN python3 -c "import vllm; import torch; print('vllm OK:', vllm.__version__, '| torch:', torch.__version__)" && \

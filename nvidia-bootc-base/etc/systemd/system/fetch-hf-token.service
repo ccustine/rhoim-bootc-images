@@ -1,0 +1,20 @@
+[Unit]
+Description=Fetch Hugging Face token from AWS Secrets Manager
+After=network-online.target
+Wants=network-online.target
+Before=rhoim-vllm.service
+ConditionPathExists=!/etc/vllm/hf-token.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fetch-hf-token.sh
+RemainAfterExit=yes
+StandardOutput=journal+console
+StandardError=journal+console
+
+# Run as root to write to /etc/vllm
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

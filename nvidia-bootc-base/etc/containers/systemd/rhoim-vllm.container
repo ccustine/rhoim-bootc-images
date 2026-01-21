@@ -1,0 +1,29 @@
+[Unit]
+Description=RHOIM vLLM (RHAIIS container)
+After=network-online.target nvidia-post-boot-setup.service fetch-hf-token.service
+Wants=network-online.target fetch-hf-token.service
+Requires=nvidia-post-boot-setup.service
+
+[Container]
+Image=registry.redhat.io/rhaiis/vllm-cuda-rhel9:latest
+PublishPort=8000:8000
+
+Volume=/var/lib/rhoim/models:/models:Z
+Volume=/var/lib/rhoim/cache:/opt/app-root/src/.cache:Z
+
+EnvironmentFile=/etc/sysconfig/rhoim
+EnvironmentFile=-/etc/vllm/hf-token.env
+
+PodmanArgs=--pids-limit=0
+PodmanArgs=--security-opt=label=disable
+PodmanArgs=--device nvidia.com/gpu=all
+
+Exec=--model ${MODEL_ID} --host ${VLLM_HOST} --port ${VLLM_PORT} ${VLLM_EXTRA_ARGS}
+
+[Service]
+Restart=always
+RestartSec=10
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target
